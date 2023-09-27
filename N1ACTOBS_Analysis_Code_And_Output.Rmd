@@ -1,0 +1,653 @@
+---
+title: "Analysis Code & Output"
+author: "Constanze Weber"
+date: "09/2023"
+output: 
+  html_document:
+    theme: cerulean
+    
+---
+
+```{r echo=FALSE, include=FALSE}
+
+# CW (09/2023)
+
+#routine
+remove(list=ls()) # clear workspace
+setwd("C:\\Users\\constanze\\Desktop\\N1ACTOBS_analysis") # set working directory
+
+options(width=500, scipen=6, digits=8)
+library(lme4)
+library(lmerTest)
+library(buildmer)
+library(ggeffects)
+library(ggplot2)
+```
+
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+
+#### This file documents the analysis reported on the Poster **Testing Effects of Sensorimotor Learning and Its Viewpoint-Dependency on Auditory ERP Attenuation During Action Observation** presented at SPR 2023. The sample comprises 86 subjects; each experimental condition comprised 80 trials. Analyses are based on trial-level data. Output is inserted as r comments.
+####    R version 4.0.3 (2020-10-10), running under Windows 10 x64 (build 19044), was used to generate this document.
+
+
+### Read, arrange and code data for LME-models
+``` {r eval=FALSE}
+
+# remerge data (group, trialnumber), separate rows for electrodes
+averaged_data <- read.csv("averaged_data.csv")
+averaged_data <- averaged_data[,-1]
+names(averaged_data)[1] <- "id"
+# averaged_data contains single-trial averaged/mean amplitude data
+
+# read group table
+groups <- read.csv("groups.csv")
+groups <- groups[,-1]
+names(groups) <- c("id", "group") 
+
+# add group column by merging averaged data with group table
+averaged_data <- merge(averaged_data, groups, by = c("id"))
+
+# add trial number variable
+averaged_data$trial <- rep(1:80, times= nrow(averaged_data)/80)
+
+# rearrange data
+
+# n1
+n1data <- c() #85440
+n1data$id <- rep(averaged_data$id, times=3)
+n1data <- as.data.frame(n1data)
+
+n1data$condition <- rep(averaged_data$condition, times=3)
+n1data$group <- rep(averaged_data$group, times=3)
+n1data$trial <- rep(averaged_data$trial, times=3)
+n1data$electrode <- c(rep("Fz", times= nrow(averaged_data)/80), rep("FCz", times= nrow(averaged_data)/80),
+                      rep("Cz", times= nrow(averaged_data)/80))
+n1data$average <- c(averaged_data$n1average_Fz, averaged_data$n1average_FCz, averaged_data$n1average_Cz)
+n1data$average <- as.numeric(n1data$average)
+
+# p2
+p2data <- c()
+p2data$id <- rep(averaged_data$id, times=3)
+p2data <- as.data.frame(p2data)
+
+p2data$condition <- rep(averaged_data$condition, times=3)
+p2data$group <- rep(averaged_data$group, times=3)
+p2data$trial <- rep(averaged_data$trial, times=3)
+p2data$electrode <- c(rep("Fz", times= nrow(averaged_data)/80), rep("FCz", times= nrow(averaged_data)/80),
+                      rep("Cz", times= nrow(averaged_data)/80))
+p2data$average <- c(averaged_data$p2average_Fz, averaged_data$p2average_FCz, averaged_data$p2average_Cz)
+p2data$average <- as.numeric(p2data$average)
+
+#n2
+n2data <- c()
+n2data$id <- rep(averaged_data$id, times=3)
+n2data <- as.data.frame(n2data)
+
+n2data$condition <- rep(averaged_data$condition, times=3)
+n2data$group <- rep(averaged_data$group, times=3)
+n2data$trial <- rep(averaged_data$trial, times=3)
+n2data$electrode <- c(rep("Fz", times= nrow(averaged_data)/80), rep("FCz", times= nrow(averaged_data)/80),
+                      rep("Cz", times= nrow(averaged_data)/80))
+n2data$average <- c(averaged_data$n2average_Fz, averaged_data$n2average_FCz, averaged_data$n2average_Cz)
+n2data$average <- as.numeric(n2data$average)
+
+modeldata <- cbind(n1data, p2data$average, n2data$average)
+names(modeldata)[6:8] <- c("n1average", "p2average", "n2average")
+modeldata$soundtype <- ifelse(substr(modeldata$condition, 1, 3)=="amc", "act", "vis")
+modeldata$perspective <- ifelse(substr(modeldata$condition, 5, 5)=="1", 1, 3)
+
+# code factors for model
+modeldata$trainingeffect <- as.factor(modeldata$group)
+contrasts(modeldata$trainingeffect) <- contr.treatment(4, base=4)
+# trainingeffect: 1: AT vs VT; 2: VAT vs VT; 3: VMT vs VT
+
+modeldata$soundtypeeffect <- ifelse(modeldata$soundtype == "act", -1, 1)
+modeldata$perspectiveeffect <- ifelse(modeldata$perspective == 1, -1, 1)
+modeldata$trialeffect <- modeldata$trial - 40.5 # center around middle
+modeldata$trialeffect <- modeldata$trialeffect/8 # to scale parameter estimate
+
+# for extracting data for plotting
+modeldata$soundtypeeffect_act <- as.factor(modeldata$soundtypeeffect)
+contrasts(modeldata$soundtypeeffect_act) = contr.treatment(2, base=1)
+modeldata$soundtypeeffect_ext <- as.factor(modeldata$soundtypeeffect)
+contrasts(modeldata$soundtypeeffect_ext) = contr.treatment(2, base=2)
+
+
+```
+
+### N1 Analysis
+
+```  {r eval=FALSE}
+#### N1: Model selection ####
+
+# Save formula of maximal model
+maximalmodel <- n1average ~ soundtypeeffect*perspectiveeffect*trainingeffect*trialeffect + 
+  (1+soundtypeeffect*perspectiveeffect*trainingeffect*trialeffect|id) + (1|electrode)
+
+# Find largest model that still converges with buildmer() 
+m <- buildmer(maximalmodel, data = modeldata,
+              buildmerControl=buildmerControl(direction='order',
+                                              args=list(control=lmerControl(optimizer='bobyqa')))) #, crit='BIC'))         
+summary(m)
+
+(f <- formula(m@model)) # formula of maximal feasible model
+
+# Try stepwise elimination to find a more parsimoniuous model (default criterion: LRT)
+parsimonious_m <- buildmer(f, data = modeldata, buildmerControl=list(direction='backward',
+                                                                     args=list(control=lmerControl(optimizer='bobyqa'))))
+summary(parsimonious_m)
+
+(parsimonious_m_n1 <- formula(parsimonious_m@model)) # formula of most parsimonious model
+
+# n1average ~ 1 + trainingeffect + perspectiveeffect + trainingeffect:perspectiveeffect +  
+#   soundtypeeffect + trainingeffect:soundtypeeffect + trialeffect +  
+#   perspectiveeffect:trialeffect + soundtypeeffect:trialeffect +  
+#   perspectiveeffect:soundtypeeffect + trainingeffect:perspectiveeffect:soundtypeeffect +  
+#   perspectiveeffect:soundtypeeffect:trialeffect + (1 + perspectiveeffect +  
+#                                                      soundtypeeffect + perspectiveeffect:soundtypeeffect + trialeffect +  
+#                                                      perspectiveeffect:trialeffect + soundtypeeffect:trialeffect +  
+#                                                      perspectiveeffect:soundtypeeffect:trialeffect | id)
+
+parsimonious_m_n1 <- n1average ~ 1 + trainingeffect + perspectiveeffect + trainingeffect:perspectiveeffect +  
+  soundtypeeffect + trainingeffect:soundtypeeffect + trialeffect +  
+  perspectiveeffect:trialeffect + soundtypeeffect:trialeffect +  
+  perspectiveeffect:soundtypeeffect + trainingeffect:perspectiveeffect:soundtypeeffect +  
+  perspectiveeffect:soundtypeeffect:trialeffect + (1 + perspectiveeffect +  
+                                                     soundtypeeffect + perspectiveeffect:soundtypeeffect + trialeffect +  
+                                                     perspectiveeffect:trialeffect + soundtypeeffect:trialeffect +  
+                                                     perspectiveeffect:soundtypeeffect:trialeffect | id)
+
+
+#### N1 Fit identified model again & resolve IA ####
+
+n1_parsimonious <- lmer(parsimonious_m_n1, data=modeldata, REML=T,
+                        control = lmerControl(optimizer="bobyqa"))
+summary(n1_parsimonious)
+
+# > summary(n1_parsimonious)
+# Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+# Formula: parsimonious_m_n1
+#    Data: modeldata
+# Control: lmerControl(optimizer = "bobyqa")
+# 
+# REML criterion at convergence: 435132.9
+# 
+# Scaled residuals: 
+#     Min      1Q  Median      3Q     Max 
+# -7.4515 -0.6366 -0.0032  0.6172  6.0523 
+# 
+# Random effects:
+#  Groups   Name                                          Variance Std.Dev. Corr                               
+#  id       (Intercept)                                    4.47047 2.1143                                      
+#           perspectiveeffect                              1.58836 1.2603    0.26                              
+#           soundtypeeffect                                1.20947 1.0998   -0.01 -0.17                        
+#           trialeffect                                    0.04231 0.2057   -0.17 -0.31  0.17                  
+#           perspectiveeffect:soundtypeeffect              1.21662 1.1030    0.29  0.12  0.28  0.06            
+#           perspectiveeffect:trialeffect                  0.02699 0.1643   -0.09  0.10 -0.36  0.08 -0.06      
+#           soundtypeeffect:trialeffect                    0.01980 0.1407    0.02  0.19  0.10  0.18  0.08  0.22
+#           perspectiveeffect:soundtypeeffect:trialeffect  0.03439 0.1854    0.17  0.02 -0.26 -0.27 -0.01  0.00
+#  Residual                                               86.34759 9.2923                                      
+#       
+#       
+#       
+#       
+#       
+#       
+#       
+#       
+#  -0.07
+#       
+# Number of obs: 59475, groups:  id, 86
+# 
+# Fixed effects:
+#                                                    Estimate Std. Error        df t value Pr(>|t|)    
+# (Intercept)                                       -3.889212   0.477966 77.307599  -8.137  5.4e-12 ***
+# trainingeffect1                                   -0.313983   0.654498 75.612133  -0.480  0.63280    
+# trainingeffect2                                   -0.036637   0.685674 75.605317  -0.053  0.95753    
+# trainingeffect3                                   -0.061486   0.649825 74.102467  -0.095  0.92487    
+# perspectiveeffect                                  0.622945   0.296080 77.062258   2.104  0.03864 *  
+# soundtypeeffect                                    0.048047   0.259949 74.305870   0.185  0.85386    
+# trialeffect                                        0.013857   0.026976 72.172194   0.514  0.60904    
+# trainingeffect1:perspectiveeffect                 -0.964429   0.400325 75.764862  -2.409  0.01842 *  
+# trainingeffect2:perspectiveeffect                 -0.304357   0.420669 76.267452  -0.724  0.47158    
+# trainingeffect3:perspectiveeffect                 -1.043286   0.395471 74.093936  -2.638  0.01016 *  
+# trainingeffect1:soundtypeeffect                   -0.001950   0.351132 71.960357  -0.006  0.99558    
+# trainingeffect2:soundtypeeffect                    0.005302   0.369927 72.095429   0.014  0.98860    
+# trainingeffect3:soundtypeeffect                   -0.177935   0.345236 69.802718  -0.515  0.60790    
+# perspectiveeffect:trialeffect                     -0.032349   0.023308 72.439701  -1.388  0.16942    
+# soundtypeeffect:trialeffect                        0.018798   0.021356 80.194520   0.880  0.38137    
+# perspectiveeffect:soundtypeeffect                  0.485784   0.270655 67.082395   1.795  0.07718 .  
+# trainingeffect1:perspectiveeffect:soundtypeeffect -0.460972   0.372874 67.654748  -1.236  0.22063    
+# trainingeffect2:perspectiveeffect:soundtypeeffect -0.502855   0.392380 67.247792  -1.282  0.20440    
+# trainingeffect3:perspectiveeffect:soundtypeeffect -1.057455   0.367629 65.416928  -2.876  0.00542 ** 
+# perspectiveeffect:soundtypeeffect:trialeffect      0.005928   0.025181 73.600129   0.235  0.81453    
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Correlation matrix not shown by default, as p = 20 > 12.
+# Use print(x, correlation=TRUE)  or
+#     vcov(x)        if you need it
+# 
+# optimizer (bobyqa) convergence code: 0 (OK)
+# maxfun < 10 * length(par)^2 is not recommended.
+
+
+## Resolve three-way interaction between training x sound type x perspective
+
+# resolve three-way interaction with interactions package
+n1_threeway <- interactions::probe_interaction(n1_parsimonious, 
+             pred = soundtypeeffect , modx = trainingeffect, mod2=perspectiveeffect)
+# No significant effect of Sound Type for any of the factor combinations
+
+# Separate models for both sound types: 2-way IA (perspective x time) for ACT & CUE sounds?
+
+modeldata_act <- subset(modeldata, soundtype=="act")
+modeldata_ext <- subset(modeldata, soundtype=="vis")
+
+### ACT Sounds ###
+
+# Save formula of maximal model
+maximalmodel <- n1average ~ perspectiveeffect*trainingeffect*trialeffect + 
+  (1+perspectiveeffect*trainingeffect*trialeffect|id) + (1|electrode)
+
+
+# Find largest model that still converges with buildmer() 
+m <- buildmer(maximalmodel, data = modeldata_act,
+              buildmerControl=buildmerControl(direction='order',
+                                              args=list(control=lmerControl(optimizer='bobyqa')))) #, crit='BIC'))         
+summary(m)
+
+(f <- formula(m@model)) # formula of maximal feasible model can also be retrieved with this line
+
+# Try stepwise elimination to find a more parsimoniuous model (default criterion: LRT)
+parsimonious_m <- buildmer(f, data = modeldata_act, buildmerControl=list(direction='backward',
+                                                                         args=list(control=lmerControl(optimizer='bobyqa'))))#, crit='BIC')) 
+summary(parsimonious_m)
+
+parsimonious_m_act_model <- parsimonious_m
+(parsimonious_m_n1_act <- formula(parsimonious_m@model))
+
+
+### CUE Sounds ###
+
+# Save formula of maximal model
+maximalmodel <- n1average ~ perspectiveeffect*trainingeffect*trialeffect + 
+  (1+perspectiveeffect*trainingeffect*trialeffect|id) + (1|electrode)
+
+
+# Find largest model that still converges with buildmer() 
+m <- buildmer(maximalmodel, data = modeldata_ext,
+              buildmerControl=buildmerControl(direction='order',
+                                              args=list(control=lmerControl(optimizer='bobyqa')))) #, crit='BIC'))         
+summary(m)
+
+(f <- formula(m@model)) # formula of maximal feasible model can also be retrieved with this line
+
+# Try stepwise elimination to find a more parsimoniuous model (default criterion: LRT)
+parsimonious_m <- buildmer(f, data = modeldata_ext, buildmerControl=list(direction='backward',
+                                                                         args=list(control=lmerControl(optimizer='bobyqa'))))#, crit='BIC')) 
+summary(parsimonious_m)
+
+parsimonious_m_ext_model <- parsimonious_m
+(parsimonious_m_n1_ext <- formula(parsimonious_m@model))
+
+## Look at both models
+
+summary(parsimonious_m_act_model)
+summary(parsimonious_m_ext_model)
+
+# Output N1 models separately for Sound Type
+
+# > summary(parsimonious_m_act_model)
+# Linear mixed model fit by REML
+# (p-values based on Wald z-scores) ['lmerMod']
+# Formula: 
+#   n1average ~ 1 + perspectiveeffect + trialeffect + perspectiveeffect:trialeffect +  
+#   (1 + perspectiveeffect + trialeffect + perspectiveeffect:trialeffect |  
+#      id)
+# Data: modeldata_act
+# Control: lmerControl(optimizer = "bobyqa")
+# 
+# REML criterion at convergence: 241364.4
+# 
+# Scaled residuals: 
+#   Min      1Q  Median      3Q     Max 
+# -7.4062 -0.6339 -0.0113  0.6277  6.0154 
+# 
+# Random effects:
+#   Groups   Name                          Variance Std.Dev. Corr             
+# id       (Intercept)                    5.36270 2.3158                    
+# perspectiveeffect              2.45086 1.5655    0.16            
+# trialeffect                    0.04923 0.2219   -0.18 -0.31      
+# perspectiveeffect:trialeffect  0.06119 0.2474   -0.16  0.04  0.10
+# Residual                               87.35854 9.3466                    
+# Number of obs: 32940, groups:  id, 84
+# 
+# Fixed effects:
+#   Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)                   -3.94535    0.26226 -15.044   <2e-16 ***
+#   perspectiveeffect              0.07229    0.18346   0.394    0.694    
+# trialeffect                   -0.01165    0.03078  -0.378    0.705    
+# perspectiveeffect:trialeffect -0.04331    0.03308  -1.309    0.190    
+# ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Correlation of Fixed Effects:
+#   (Intr) prspct trlffc
+# prspctvffct  0.164              
+# trialeffect -0.134 -0.241       
+# prspctvffc: -0.129  0.032  0.077
+# > summary(parsimonious_m_ext_model)
+# Linear mixed model fit by REML
+# (p-values based on Wald z-scores) ['lmerMod']
+# Formula: n1average ~ 1 + perspectiveeffect + trialeffect + trainingeffect +  
+#   perspectiveeffect:trainingeffect + perspectiveeffect:trialeffect +  
+#   (1 + perspectiveeffect + trialeffect + perspectiveeffect:trialeffect |  
+#      id)
+# Data: modeldata_ext
+# Control: lmerControl(optimizer = "bobyqa")
+# 
+# REML criterion at convergence: 193801.7
+# 
+# Scaled residuals: 
+#   Min      1Q  Median      3Q     Max 
+# -4.6191 -0.6398  0.0063  0.6100  5.9506 
+# 
+# Random effects:
+#   Groups   Name                          Variance Std.Dev. Corr             
+# id       (Intercept)                    5.33399 2.3095                    
+# perspectiveeffect              3.15087 1.7751    0.35            
+# trialeffect                    0.06787 0.2605    0.00 -0.01      
+# perspectiveeffect:trialeffect  0.06371 0.2524   -0.15  0.04 -0.07
+# Residual                               85.09347 9.2246                    
+# Number of obs: 26535, groups:  id, 84
+# 
+# Fixed effects:
+#   Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)                       -3.86439    0.52955  -7.298 2.93e-13 ***
+#   perspectiveeffect                  0.93279    0.42265   2.207 0.027315 *  
+#   trialeffect                        0.03329    0.03673   0.906 0.364753    
+# trainingeffect1                   -0.23888    0.74253  -0.322 0.747673    
+# trainingeffect2                    0.28920    0.79584   0.363 0.716311    
+# trainingeffect3                   -0.17267    0.73257  -0.236 0.813665    
+# perspectiveeffect:trainingeffect1 -1.15322    0.59579  -1.936 0.052917 .  
+# perspectiveeffect:trainingeffect2 -0.35945    0.64373  -0.558 0.576581    
+# perspectiveeffect:trainingeffect3 -1.95217    0.58651  -3.328 0.000873 ***
+#   perspectiveeffect:trialeffect     -0.01697    0.03603  -0.471 0.637641    
+# ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Correlation of Fixed Effects:
+#   (Intr) prspct trlffc trnng1 trnng2 trnng3 prsp:1 prsp:2 prsp:3
+# prspctvffct  0.321                                                        
+# trialeffect -0.004 -0.007                                                 
+# tranngffct1 -0.711 -0.229  0.010                                          
+# tranngffct2 -0.663 -0.214  0.004  0.473                                   
+# tranngffct3 -0.720 -0.232  0.007  0.514  0.479                            
+# prspctvff:1 -0.229 -0.709 -0.002  0.322  0.152  0.165                     
+# prspctvff:2 -0.211 -0.656 -0.001  0.151  0.375  0.153  0.466              
+# prspctvff:3 -0.232 -0.720  0.001  0.165  0.154  0.346  0.511  0.473       
+# prspctvffc: -0.059  0.014  0.007  0.003  0.001  0.002  0.010  0.000  0.006
+
+
+#### Visualize 3way interaction ####
+library(ggeffects)
+library(ggplot2)
+
+# Fit again with factorized predictors
+modeldata_factor <- modeldata
+
+modeldata_factor$trainingeffect <- as.factor(modeldata_factor$trainingeffect)
+modeldata_factor$perspectiveeffect <- as.factor(modeldata_factor$perspectiveeffect)
+modeldata_factor$soundtypeeffect <- as.factor(modeldata_factor$soundtypeeffect)
+
+n1_factor <- lmer(n1_parsimonious, data=modeldata_factor, REML=T,
+                  control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e6)))
+summary(n1_factor)
+
+# save values from the model
+plotdata <- ggpredict(n1_factor, terms = c("perspectiveeffect","soundtypeeffect", "trainingeffect"))
+#plotdata$group <- ifelse(plotdata$group == -1, "First-Person", "Third-Person")
+
+plotdata$facet <- factor(plotdata$facet, levels = plotdata$facet[c(1,3,2,4)])
+plotdata$facet  # notice the changed order of factor levels
+
+facet_labels <- as_labeller(c("AT" = "Execution-Only",
+                              "VMT" = "Observation-Imagery",
+                              "VAT" = "Observation-Execution",
+                              "VT" = "Observation-Only"))
+
+#plot (add labels after checking plot without)
+png(filename = paste0("N1_soundtype_perspective_training.png"),width=4, height=3, unit="in", res=600) # 12, 4
+plot <- plot(plotdata, connect.lines = F, show.title = F, show.x.title = T, show.y.title = F, show.legend = F)
+plot + 
+  scale_y_reverse() +
+  theme_classic() +
+  theme(axis.title.x=element_blank(),
+        axis.text.x = element_text(color="black"),#, face="bold"),
+        axis.ticks = element_line(color = "black") #, panel.spacing = unit(20,"pt")
+  ) + labs(x = "Viewpoint", color='Sound Type') +
+  scale_color_manual(values = c("green3", "blue"), labels=c("ACT sounds", "CUE sounds")) +
+  ylim(-1, -7) + 
+  scale_fill_manual(values = c("green3", "blue"))+ 
+  #scale_x_discrete(breaks=c(-1, 1))+
+  #scale_x_continuous(breaks=c(-1,1) ,labels = c("First-Person", "Third-Person"))+
+  facet_wrap(~facet, labeller = labeller(facet = facet_labels), ncol=2)
+
+dev.off()
+
+
+```
+
+### P2 Analysis
+```  {r eval=FALSE}
+#### P2: Model selection ####
+
+# Save formula of maximal model
+maximalmodel <- p2average ~ soundtypeeffect*perspectiveeffect*trainingeffect*trialeffect + 
+  (1+soundtypeeffect*perspectiveeffect*trainingeffect*trialeffect|id) + (1|electrode)
+
+# Find largest model that still converges with buildmer() 
+m <- buildmer(maximalmodel, data = modeldata,
+              buildmerControl=buildmerControl(direction='order',
+                                              args=list(control=lmerControl(optimizer='bobyqa'))))#, crit='BIC'))              
+summary(m)
+
+(f <- formula(m@model)) # formula of maximal feasible model
+
+# Try stepwise elimination to find a more parsimoniuous model (default criterion: LRT)
+parsimonious_m <- buildmer(f, data = modeldata, buildmerControl=list(direction='backward',
+                                                                     args=list(control=lmerControl(optimizer='bobyqa'))))#, crit='BIC'))
+summary(parsimonious_m)
+
+(parsimonious_m_p2 <- formula(parsimonious_m@model))
+
+# p2average ~ trialeffect+
+#   trainingeffect+soundtypeeffect+perspectiveeffect+
+#   trainingeffect:soundtypeeffect+
+#   trainingeffect:perspectiveeffect+
+#   trainingeffect:soundtypeeffect:perspectiveeffect+(1+soundtypeeffect+
+#   perspectiveeffect+trialeffect+soundtypeeffect:perspectiveeffect+
+#   perspectiveeffect:trialeffect+soundtypeeffect:trialeffect|id)
+
+parsimonious_m_p2 <- p2average ~ trialeffect+
+  trainingeffect+soundtypeeffect+perspectiveeffect+
+  trainingeffect:soundtypeeffect+
+  trainingeffect:perspectiveeffect+
+  trainingeffect:soundtypeeffect:perspectiveeffect+(1+soundtypeeffect+
+                                                      perspectiveeffect+trialeffect+soundtypeeffect:perspectiveeffect+
+                                                      perspectiveeffect:trialeffect+soundtypeeffect:trialeffect|id)
+
+p2 <- lmer(parsimonious_m_p2, data=modeldata, REML=T,
+           control = lmerControl(optimizer="bobyqa"))
+summary(p2)
+
+# > summary(p2)
+# Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+# Formula: parsimonious_m_p2
+#    Data: modeldata
+# Control: lmerControl(optimizer = "bobyqa")
+# 
+# REML criterion at convergence: 442041.7
+# 
+# Scaled residuals: 
+#     Min      1Q  Median      3Q     Max 
+# -6.7551 -0.6289 -0.0044  0.6285  4.9993 
+# 
+# Random effects:
+#  Groups   Name                              Variance Std.Dev. Corr                               
+#  id       (Intercept)                        5.01892 2.2403                                      
+#           soundtypeeffect                    1.45652 1.2069   -0.08                              
+#           perspectiveeffect                  1.18176 1.0871   -0.06  0.06                        
+#           trialeffect                        0.05406 0.2325   -0.27  0.12 -0.15                  
+#           soundtypeeffect:perspectiveeffect  1.01973 1.0098    0.01  0.09  0.42 -0.17            
+#           perspectiveeffect:trialeffect      0.04453 0.2110   -0.22 -0.11  0.19 -0.07 -0.01      
+#           soundtypeeffect:trialeffect        0.04430 0.2105   -0.11  0.13 -0.27  0.05 -0.06  0.14
+#  Residual                                   97.10371 9.8541                                      
+# Number of obs: 59475, groups:  id, 86
+# 
+# Fixed effects:
+#                                                     Estimate Std. Error       df t value Pr(>|t|)    
+# (Intercept)                                          3.25429    0.49500 80.30102   6.574 4.55e-09 ***
+# trialeffect                                         -0.17075    0.02966 76.61184  -5.758 1.68e-07 ***
+# trainingeffect1                                     -0.32726    0.67678 78.66016  -0.484   0.6301    
+# trainingeffect2                                     -0.58420    0.70768 78.15952  -0.826   0.4116    
+# trainingeffect3                                      0.09920    0.67074 76.69083   0.148   0.8828    
+# soundtypeeffect                                     -0.45436    0.29176 64.22741  -1.557   0.1243    
+# perspectiveeffect                                    0.03588    0.25671 63.79597   0.140   0.8893    
+# trainingeffect1:soundtypeeffect                      0.59796    0.40223 65.18019   1.487   0.1419    
+# trainingeffect2:soundtypeeffect                      0.13942    0.42237 65.43792   0.330   0.7424    
+# trainingeffect3:soundtypeeffect                      0.26004    0.39505 63.38097   0.658   0.5128    
+# trainingeffect1:perspectiveeffect                   -0.26122    0.35473 65.33419  -0.736   0.4641    
+# trainingeffect2:perspectiveeffect                    0.19040    0.37398 65.18119   0.509   0.6124    
+# trainingeffect3:perspectiveeffect                   -0.63181    0.34873 63.37194  -1.812   0.0748 .  
+# trainingeffectAT:soundtypeeffect:perspectiveeffect  -0.26020    0.24016 68.78173  -1.083   0.2824    
+# trainingeffectVAT:soundtypeeffect:perspectiveeffect -0.29167    0.26615 67.13628  -1.096   0.2771    
+# trainingeffectVMT:soundtypeeffect:perspectiveeffect -0.57131    0.23138 64.29577  -2.469   0.0162 *  
+# trainingeffectVT:soundtypeeffect:perspectiveeffect   0.42970    0.24975 66.10212   1.721   0.0900 .  
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Correlation matrix not shown by default, as p = 17 > 12.
+# Use print(x, correlation=TRUE)  or
+#     vcov(x)        if you need it
+
+## Resolve interaction
+
+# resolve three-way interaction
+p2_threeway <- interactions::probe_interaction(p2, 
+                                               pred = soundtypeeffect , modx = trainingeffect, mod2=perspectiveeffect)
+# no significant effect of Sound Type
+
+# Separate models for both sound types: 2-way IA (viewpoint x training) for ACT & CUE sounds?
+
+modeldata_act <- subset(modeldata, soundtype=="act")
+modeldata_ext <- subset(modeldata, soundtype=="vis")
+
+### ACT Sounds ###
+
+# Save formula of maximal model
+maximalmodel <- p2average ~ perspectiveeffect*trainingeffect*trialeffect + 
+  (1+perspectiveeffect*trainingeffect*trialeffect|id) + (1|electrode)
+
+
+# Find largest model that still converges with buildmer() 
+m <- buildmer(maximalmodel, data = modeldata_act,
+              buildmerControl=buildmerControl(direction='order',
+                                              args=list(control=lmerControl(optimizer='bobyqa')))) #, crit='BIC'))         
+summary(m)
+
+(f <- formula(m@model)) # formula of maximal feasible model can also be retrieved with this line
+
+# Try stepwise elimination to find a more parsimoniuous model (default criterion: LRT)
+parsimonious_m <- buildmer(f, data = modeldata_act, buildmerControl=list(direction='backward',
+                                                                         args=list(control=lmerControl(optimizer='bobyqa'))))#, crit='BIC')) 
+summary(parsimonious_m)
+
+parsimonious_m_act_model <- parsimonious_m
+(parsimonious_m_p2_act <- formula(parsimonious_m@model))
+
+
+### CUE Sounds ###
+
+# Save formula of maximal model
+maximalmodel <- p2average ~ perspectiveeffect*trainingeffect*trialeffect + 
+  (1+perspectiveeffect*trainingeffect*trialeffect|id) + (1|electrode)
+
+
+# Find largest model that still converges with buildmer() 
+m <- buildmer(maximalmodel, data = modeldata_ext,
+              buildmerControl=buildmerControl(direction='order',
+                                              args=list(control=lmerControl(optimizer='bobyqa')))) #, crit='BIC'))         
+summary(m)
+
+(f <- formula(m@model)) # formula of maximal feasible model can also be retrieved with this line
+
+# Try stepwise elimination to find a more parsimoniuous model (default criterion: LRT)
+parsimonious_m <- buildmer(f, data = modeldata_ext, buildmerControl=list(direction='backward',
+                                                                         args=list(control=lmerControl(optimizer='bobyqa'))))#, crit='BIC')) 
+summary(parsimonious_m)
+
+parsimonious_m_ext_model <- parsimonious_m
+(parsimonious_m_p2_ext <- formula(parsimonious_m@model))
+
+## Look at both models
+
+summary(parsimonious_m_act_model)
+summary(parsimonious_m_ext_model)
+                   
+#### Visualize 3way interaction ####
+library(ggeffects)
+library(ggplot2)
+
+# Fit again with factorized predictors
+modeldata_factor <- modeldata
+
+modeldata_factor$trainingeffect <- as.factor(modeldata_factor$trainingeffect)
+modeldata_factor$perspectiveeffect <- as.factor(modeldata_factor$perspectiveeffect)
+modeldata_factor$soundtypeeffect <- as.factor(modeldata_factor$soundtypeeffect)
+
+p2_factor <- lmer(parsimonious_m_p2, data=modeldata_factor, REML=T,
+                  control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e6)))
+summary(p2_factor)
+
+# save values from the model
+#plotdata <- ggpredict(n1_parsimonious, terms = c("perspectiveeffect","soundtypeeffect", "trainingeffect"))
+
+plotdata <- ggpredict(p2_factor, terms = c("perspectiveeffect","soundtypeeffect", "trainingeffect"))
+#plotdata <- ggpredict(n1_factor, terms = c("soundtypeeffect", "perspectiveeffect","trainingeffect"))
+
+plotdata$x <- as.factor(plotdata$x)
+plotdata$x <- ifelse(plotdata$x==-1, "ACT", "CUE")
+
+plotdata$facet <- factor(plotdata$facet, levels = plotdata$facet[c(1,3,2,4)])
+plotdata$facet  # notice the changed order of factor levels
+
+facet_labels <- as_labeller(c("AT" = "Execution-Only",
+                              "VMT" = "Observation-Imagery",
+                              "VAT" = "Observation-Execution",
+                              "VT" = "Observation-Only"))
+
+#plot (add labels after checking plot without)
+png(filename = paste0("P2_soundtype_perspective_training.png"),width=4, height=3, unit="in", res=600) # 12, 4
+plot <- plot(plotdata, connect.lines = F, show.title = F, show.x.title = F, show.y.title = F, show.legend = F)
+plot + 
+  scale_y_reverse() +
+  theme_classic() +
+  theme(axis.title.x=element_blank(),
+        axis.text.x = element_text(color="black"),#, face="bold"),
+        axis.ticks = element_line(color = "black") #, panel.spacing = unit(20,"pt")
+  ) + labs(x = "Viewpoint", color='Sound Type') +
+  scale_color_manual(values = c("green3", "blue"), labels=c("ACT sounds", "CUE sounds")) +
+  ylim(6, -1) + 
+  scale_fill_manual(values = c("green3", "blue"))+ 
+  #scale_x_discrete(breaks=c(-1, 1))+
+  #scale_x_continuous(breaks=c(-1,1) ,labels = c("First-Person", "Third-Person"))+
+  facet_wrap(~facet, labeller = labeller(facet = facet_labels), ncol=2)
+
+dev.off()
+```
